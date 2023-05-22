@@ -1,7 +1,24 @@
+#include <math.h>
 #include <Wire.h>
 
 int16_t c0;
 int16_t c1;
+int32_t c00;
+int32_t c10;
+int16_t c01;
+int16_t c11;
+int16_t c20;
+int16_t c21;
+int16_t c30;
+
+int32_t complement_two(int32_t value, int8_t bits)
+{
+  if (value > pow(2, bits - 1) - 1)
+  {
+    return value - pow(2, bits);
+  }
+  return value;
+}
 
 void setup()
 {
@@ -42,19 +59,36 @@ void setup()
       break;
   }
 
-  c0 = (coefficients[0] << 4) + ((coefficients[1] >> 4) & 0x0F);
-  c1 = ((coefficients[1] & 0x0F) << 8) + coefficients[2];
+  c0  = (coefficients[0] << 4) + ((coefficients[1] >> 4) & 0x0F);
+  c1  = ((coefficients[1] & 0x0F) << 8) + coefficients[2];
+  c00 = (coefficients[3] << 12) + (coefficients[4] << 4) + (coefficients[5] >> 4);
+  c10 = ((coefficients[5] & 0x0F) << 16) + (coefficients[6] << 8) + coefficients[7];
+  c01 = (coefficients[8] << 8) + coefficients[9];
+  c11 = (coefficients[10] << 8) + coefficients[11];
+  c20 = (coefficients[12] << 8) + coefficients[13];
+  c21 = (coefficients[14] << 8) + coefficients[15];
+  c30 = (coefficients[16] << 8) + coefficients[17];
   
 
-  if (c0 > (2048 - 1))
-  {
-    c0 -= 4096;
-  }
-  if (c1 > (2048 - 1))
-  {
-    c1 -= 4096;
-  }
+  c0  = complement_two(c0,  12);
+  c1  = complement_two(c1,  12);
+  c00 = complement_two(c00, 20);
+  c10 = complement_two(c10, 20);
+  c01 = complement_two(c01, 16);
+  c11 = complement_two(c11, 16);
+  c20 = complement_two(c20, 16);
+  c21 = complement_two(c21, 16);
+  c30 = complement_two(c30, 16);
 
+  Serial.println(c0);
+  Serial.println(c1);
+  Serial.println(c00);
+  Serial.println(c10);
+  Serial.println(c01);
+  Serial.println(c11);
+  Serial.println(c20);
+  Serial.println(c21);
+  Serial.println(c30);
 }
 
 void pressure()
@@ -77,8 +111,12 @@ void pressure()
   int32_t pressure    = ((uint32_t)(data[0]) << 16) + ((uint32_t)(data[1]) << 8) + data[2];
   int32_t temperature = ((uint32_t)(data[3]) << 16) + ((uint32_t)(data[4]) << 8) + data[5];
 
-  float fPressure = pressure / 524288.f;
-  float fTemperature = (float)c0 * 0.5f + (float)c1 * temperature / 524288.f;
+  pressure = complement_two(pressure, 24);
+
+  float pRaw = pressure / 524288.f;
+  float tRaw = temperature / 524288.f;
+  float fPressure = (float)c00 + pRaw * ((float)c10 + pRaw * ((float)c20 + pRaw * (float)c30)) + tRaw * (float)c01 + tRaw * pRaw * ((float)c1 + pRaw * (float)c21);
+  float fTemperature = (float)c0 * 0.5f + (float)c1 * tRaw;
 
   Serial.printf("Pression = %f  Temperature = %f\n",
                 fPressure, fTemperature);
