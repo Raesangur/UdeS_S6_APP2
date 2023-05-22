@@ -11,6 +11,25 @@ int16_t c20;
 int16_t c21;
 int16_t c30;
 
+typedef enum
+{
+  NOT_READY,
+  SETUP,
+  READY,
+} humidityStep_t;
+humidityStep_t humidityStep;
+
+typedef struct
+{
+  float humidity;
+  float pressure;
+  float temperature;
+  float windSpeed;
+  float light;
+} sensors_t;
+sensors_t sensors = {0};
+
+
 int32_t complement_two(int32_t value, int8_t bits)
 {
   if (value > pow(2, bits - 1) - 1)
@@ -20,13 +39,8 @@ int32_t complement_two(int32_t value, int8_t bits)
   return value;
 }
 
-void setup()
+void pressure_temperature_setup()
 {
-  // put your setup code here, to run once:
-  Serial.begin(115200);
-  Serial.println("Bon matin!");
-
-
   Wire.begin();
 
   Wire.beginTransmission(0x77);
@@ -91,6 +105,15 @@ void setup()
   Serial.println(c30);
 }
 
+void setup()
+{
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  Serial.println("Bon matin!");
+
+  pressure_temperature_setup();
+}
+
 void pressure()
 {
   uint8_t data[6];
@@ -115,29 +138,125 @@ void pressure()
 
   float pRaw = pressure / 524288.f;
   float tRaw = temperature / 524288.f;
-  float fPressure = (float)c00 + pRaw * ((float)c10 + pRaw * ((float)c20 + pRaw * (float)c30)) + tRaw * (float)c01 + tRaw * pRaw * ((float)c1 + pRaw * (float)c21);
-  float fTemperature = (float)c0 * 0.5f + (float)c1 * tRaw;
+  sensors.pressure = (float)c00 + pRaw * ((float)c10 + pRaw * ((float)c20 + pRaw * (float)c30)) + tRaw * (float)c01 + tRaw * pRaw * ((float)c1 + pRaw * (float)c21);
+  sensors.temperature = (float)c0 * 0.5f + (float)c1 * tRaw;
 
-  Serial.printf("Pression = %f  Temperature = %f\n",
-                fPressure, fTemperature);
+  //Serial.printf("Pression = %f  Temperature = %f\n", fPressure, fTemperature);
 }
 
 
 
 
+void start_humidity()
+{
+  const static int broche = 16;
+  static int step = 0;
+  static long start = millis();
+
+  if (humidityStep == NOT_READY)
+    return;
+
+  if (step == 0)
+  {
+    pinMode(broche, OUTPUT_OPEN_DRAIN);
+    digitalWrite(broche, HIGH);
+    step = 1;
+    start = millis();
+  }
+  else if (step == 1)
+  {
+    if (millis() - start > 250)
+    {
+      digitalWrite(broche, LOW);
+      step = 2;
+      start = millis();
+    }
+  }
+  else if (step == 2)
+  {
+    if (millis() - start > 20)
+    {
+      digitalWrite(broche, HIGH);
+      delayMicroseconds(40);
+      pinMode(broche, INPUT_PULLUP);
+
+      humidityStep = READY;
+      step = 0;
+    }
+  }
+  else
+    step = 0;
+}
+
+bool check_humidity()
+{
+  const static int broche = 16;
+  if (digitalRead(broche) == HIGH)
+    return false;
+  else
+    return true;
+}
 
 
 void humidity()
 {
-  int i, j;
-  int duree[42];
-  unsigned long pulse;
-  byte data[5];
-  float humidite;
-  float temperature;
-  int broche = 16;
+  const static int broche = 16;
+  static int count = 0;
+  static int duree[42];
 
-  delay(1000);
+  static long startTime = millis();
+
+  if (humidityStep != READY)
+    return;
+
+  if (!check_humidity())
+    return;
+  
+  /*
+  unsigned long pulse = 0;
+  do {
+    pulse = pulseIn(broche, HIGH);
+    duree[count++] = pulse;
+  } while (pulse != 0);
+  */
+
+  unsigned long pulse = pulseIn(broche, HIGH);
+  duree[count++] = pulse;
+  if (pulse != 0)
+    return;
+
+  if (count != 42)
+    Serial.printf("Erreur timing %d \n", count);
+  else
+    Serial.println(millis() - startTime);
+    startTime = millis();
+
+  count = 0;
+
+  byte data[5];
+  for (int i = 0; i < 5; i++) {
+    data[i] = 0;
+    for (int j = ((8 * i) + 1); j < ((8 * i) + 9); j++) {
+      data[i] = data[i] * 2;
+      if (duree[j] > 50) {
+        data[i] = data[i] + 1;
+      }
+    }
+  }
+
+  if ((data[0] + data[1] + data[2] + data[3]) != data[4]) {
+    Serial.println(" Erreur checksum");
+  }
+
+  sensors.humidity = data[0] + (data[1] / 256.0);
+  //temperature = data[2] + (data[3] / 256.0);
+
+  humidityStep = NOT_READY;
+}
+
+void humidity_base()
+{
+  const static int broche = 16;
 
   pinMode(broche, OUTPUT_OPEN_DRAIN);
   digitalWrite(broche, HIGH);
@@ -150,20 +269,23 @@ void humidity()
 
   while (digitalRead(broche) == HIGH)
     ;
-  i = 0;
 
+  int count = 0;
+  int duree[42];
+  unsigned long pulse = 0;
   do {
     pulse = pulseIn(broche, HIGH);
-    duree[i] = pulse;
-    i++;
+    duree[count++] = pulse;
   } while (pulse != 0);
 
-  if (i != 42)
-    Serial.printf(" Erreur timing \n");
+  if (count != 42)
+    Serial.printf("Erreur timing\n");
 
-  for (i = 0; i < 5; i++) {
+
+  byte data[5];
+  for (int i = 0; i < 5; i++) {
     data[i] = 0;
-    for (j = ((8 * i) + 1); j < ((8 * i) + 9); j++) {
+    for (int j = ((8 * i) + 1); j < ((8 * i) + 9); j++) {
       data[i] = data[i] * 2;
       if (duree[j] > 50) {
         data[i] = data[i] + 1;
@@ -175,24 +297,82 @@ void humidity()
     Serial.println(" Erreur checksum");
   }
 
-  humidite = data[0] + (data[1] / 256.0);
-  temperature = data[2] + (data[3] / 256.0);
-
-  Serial.printf(" Humidite = %4.0f \%%  Temperature = %4.2f degreC \n",
-                humidite, temperature);
+  sensors.humidity = data[0] + (data[1] / 256.0);
 }
 
 void light()
 {
-  int lightValue = analogRead(A6);
-   Serial.println(lightValue);
-
-   delay(500);
+  sensor.light = analogRead(A6);
 }
 
+void windSpeed()
+{
+  static bool oldClick = false;
+  static long start = millis();
+  static int clicks = 0;
+
+  float val = analogRead(27);
+  if (oldClick)
+  {
+    if (val == 0)
+    {
+      clicks++;
+      oldClick = false;
+    }
+  }
+  else
+  {
+    if (val > 0)
+    {
+      oldClick = true;
+    }
+  }
+
+  sensors.windSpeed = clicks * 1000.0 / (millis() - start);
+
+  if (millis() - start > 10000)
+  {
+    start = millis();
+    clicks = 0;
+  }
+}
+
+void display()
+{
+  Serial.printf("\n==============================\n"
+                "Pression = %5.2fkPa\n"
+                "Temperature = %4.2f degreC\n"
+                "Vitesse = %2.2f\n"
+                "Humidite = %4.0f %%\n",
+                sensors.pressure / 1000.f, sensors.temperature, sensors.windSpeed, sensors.humidity);
+}
 
 void loop()
 {
-  pressure();
-  delay(500);
+  static long timer_2hz   = millis();
+  static long timer_1hz   = millis();
+  static long timer_0_1hz = millis();
+
+  if (millis() - timer_2hz > 500)
+  {
+    timer_2hz = millis();
+    pressure();
+    light();
+  }
+  
+  if (millis() - timer_1hz > 1000)
+  {
+    timer_1hz = millis();
+    display();
+  }
+
+  if (millis() - timer_0_1hz > 10000)
+  {
+    timer_0_1hz = millis();
+    humidity_base();
+  }
+
+  //start_humidity();
+  //humidity();
+  windSpeed();
 }
