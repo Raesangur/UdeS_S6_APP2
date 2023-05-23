@@ -27,9 +27,9 @@ static void pressure_temperature_setup();
 static void pressure();
 static void light();
 static void humidity();
-static void windSpeed();
+static void wind_speed();
 static void direction();
-static void waterLevel();
+static void water_level();
 
 
 /*************************************************************************************************/
@@ -71,7 +71,6 @@ void loop()
     pressure();
     light();
     direction();
-    waterLevel();
     display();
   }
   
@@ -86,7 +85,8 @@ void loop()
     humidity();
   }
 
-  windSpeed();
+  wind_speed();
+  water_level();
 }
 
 static void direction()
@@ -96,7 +96,6 @@ static void direction()
   static const float epsilon = 0.02;
 
   float val = analogRead(35) / 4096.0 * 3.3f;
-  Serial.println(val);
 
   for (int i = 0; i < sizeof(directions) / sizeof(char*); i++)
   {
@@ -110,9 +109,18 @@ static void direction()
   Serial.println("Unknown direction");
 }
 
-static void waterLevel()
+static void water_level()
 {
-
+  static long timer = millis();
+  if (millis() - timer > 250)
+  {
+    int val = digitalRead(23);
+    if (val == 0)
+    {
+      sensors.waterLevel += 0.2794f;
+      timer = millis();
+    }
+  }
 }
 
 static void pressure()
@@ -196,7 +204,7 @@ static void light()
   sensors.light = analogRead(A6);
 }
 
-static void windSpeed()
+static void wind_speed()
 {
   static bool oldClick = false;
   static long start = millis();
@@ -237,8 +245,9 @@ static inline void display()
                 "Vitesse = %2.2f\n"
                 "Humidite = %2.1f %%\n"
                 "Lumiere = %4.0f\n"
-                "Direction = %s\n",
-                sensors.pressure / 1000.f, sensors.temperature, sensors.windSpeed, sensors.humidity, sensors.light, sensors.windDirection);
+                "Direction = %s\n"
+                "Niveau d'eau = %2.4f mm\n",
+                sensors.pressure / 1000.f, sensors.temperature, sensors.windSpeed, sensors.humidity, sensors.light, sensors.windDirection, sensors.waterLevel);
 }
 
 
