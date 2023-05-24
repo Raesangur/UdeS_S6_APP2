@@ -1,13 +1,21 @@
 
+/*************************************************************************************************
+Pascal-Emmanuel Lachance, lacp3102
+Philippe Gauthier, gaup1302
+*************************************************************************************************/
 /*************************************************************************************************/
 /* File includes ------------------------------------------------------------------------------- */
 #include <math.h>
 #include <Wire.h>
-
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <string>
 
 /*************************************************************************************************/
 /* Type definitions ---------------------------------------------------------------------------- */
-typedef struct
+typedef struct __attribute__((__packed__))
 {
   float humidity;
   float pressure;
@@ -18,6 +26,9 @@ typedef struct
   const char* windDirection;
 } sensors_t;
 
+#define SERVICE_UUID           "6751b732-f992-11ed-be56-0242ac120002" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6751b733-f992-11ed-be56-0242ac120002"
+#define CHARACTERISTIC_UUID_TX "6751b734-f992-11ed-be56-0242ac120002"
 
 /*************************************************************************************************/
 /* Function declarations ----------------------------------------------------------------------- */
@@ -44,18 +55,86 @@ int16_t c20;
 int16_t c21;
 int16_t c30;
 
+static bool newDataFlag = false;
+static char displayTable[512] = {'\0'};
+static std::string displayString;
+BLEServer *pServer = NULL;
+BLECharacteristic * pTxCharacteristic;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint8_t txValue = 0;
+
 sensors_t sensors = {0};
 
 
 /*************************************************************************************************/
 /* Function definitions ------------------------------------------------------------------------ */
 
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+
+      if (rxValue.length() > 0) {
+        Serial.println("*********");
+        Serial.print("Received Value: ");
+        for (int i = 0; i < rxValue.length(); i++)
+          Serial.print(rxValue[i]);
+
+        Serial.println();
+        Serial.println("*********");
+      }
+    }
+};
+
 void setup()
 {
   // put your setup code here, to run once:
   Serial.begin(115200);
   Serial.println("Bon matin!");
+  
+  // Create the BLE Device
+  BLEDevice::init("La chip a fil");
 
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pTxCharacteristic = pService->createCharacteristic(
+                    CHARACTERISTIC_UUID_TX,
+                    BLECharacteristic::PROPERTY_NOTIFY
+                  );
+                      
+  pTxCharacteristic->addDescriptor(new BLE2902());
+  
+  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(
+                       CHARACTERISTIC_UUID_RX,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );  
+
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  pServer->getAdvertising()->addServiceUUID(pService->getUUID());
+  pServer->getAdvertising()->start();
+  
+  Serial.println("Waiting a client connection to notify...");
   pressure_temperature_setup();
 }
 
@@ -87,6 +166,27 @@ void loop()
 
   wind_speed();
   water_level();
+
+  
+  if (deviceConnected and newDataFlag) {
+        pTxCharacteristic->setValue(displayString);
+        pTxCharacteristic->notify();
+        newDataFlag = false;
+  delay(10); // bluetooth stack will go into congestion, if too many packets are sent
+  }
+
+    // disconnecting
+  if (!deviceConnected && oldDeviceConnected) {
+        delay(500); // give the bluetooth stack the chance to get things ready
+        pServer->startAdvertising(); // restart advertising
+        Serial.println("start advertising");
+        oldDeviceConnected = deviceConnected;
+    }
+    // connecting
+  if (deviceConnected && !oldDeviceConnected) {
+    // do stuff here on connecting
+        oldDeviceConnected = deviceConnected;
+    }
 }
 
 static void direction()
@@ -102,6 +202,8 @@ static void direction()
     if (val >= directionVals[i] - epsilon && val <= directionVals[i] + epsilon)
     {
       //Serial.println(directions[i]);
+      if (directions[i] != sensors.windDirection)
+        newDataFlag = true;
       sensors.windDirection = directions[i];
       return;
     }
@@ -117,6 +219,7 @@ static void water_level()
     int val = digitalRead(23);
     if (val == 0)
     {
+      newDataFlag = true;
       sensors.waterLevel += 0.2794f;
       timer = millis();
     }
@@ -147,8 +250,13 @@ static void pressure()
 
   float pRaw = pressure / 524288.f;
   float tRaw = temperature / 524288.f;
-  sensors.pressure = (float)c00 + pRaw * ((float)c10 + pRaw * ((float)c20 + pRaw * (float)c30)) + tRaw * (float)c01 + tRaw * pRaw * ((float)c1 + pRaw * (float)c21);
-  sensors.temperature = (float)c0 * 0.5f + (float)c1 * tRaw;
+  float temp = (float)c0 * 0.5f + (float)c1 * tRaw;
+  float pres = (float)c00 + pRaw * ((float)c10 + pRaw * ((float)c20 + pRaw * (float)c30)) + tRaw * (float)c01 + tRaw * pRaw * ((float)c1 + pRaw * (float)c21);
+  if(temp != sensors.temperature or  pres != sensors.pressure)
+    newDataFlag = true;
+  
+  sensors.pressure = pres;
+  sensors.temperature = temp;
 
   //Serial.printf("Pression = %f  Temperature = %f\n", fPressure, fTemperature);
 }
@@ -195,13 +303,18 @@ static void humidity()
   if ((data[0] + data[1] + data[2] + data[3]) != data[4]) {
     Serial.println(" Erreur checksum");
   }
-
-  sensors.humidity = data[0] + (data[1] / 256.0);
+  float humidity = data[0] + (data[1] / 256.0);
+  if(humidity != sensors.humidity)
+    newDataFlag = true;
+  sensors.humidity = humidity;
 }
 
 static void light()
 {
-  sensors.light = analogRead(A6);
+  float light = analogRead(A6);
+  if(light != sensors.light)
+    newDataFlag = true;
+  sensors.light = light;
 }
 
 static void wind_speed()
@@ -226,9 +339,11 @@ static void wind_speed()
       oldClick = true;
     }
   }
-
-  sensors.windSpeed = clicks * 1000.0 / (millis() - start);
-
+  float windSpeed = clicks * 1000.0 / (millis() - start);
+  if(windSpeed != sensors.windSpeed)
+    newDataFlag = true;
+  sensors.windSpeed = windSpeed;
+  
   if (millis() - start > 10000)
   {
     start = millis();
@@ -239,7 +354,7 @@ static void wind_speed()
 
 static inline void display()
 {
-  Serial.printf("\n==============================\n"
+  sprintf(displayTable,"\n==============================\n"
                 "Pression = %5.2fkPa\n"
                 "Temperature = %4.2f degreC\n"
                 "Vitesse = %2.2f\n"
@@ -248,6 +363,7 @@ static inline void display()
                 "Direction = %s\n"
                 "Niveau d'eau = %2.4f mm\n",
                 sensors.pressure / 1000.f, sensors.temperature, sensors.windSpeed, sensors.humidity, sensors.light, sensors.windDirection, sensors.waterLevel);
+                displayString = displayTable;
 }
 
 
